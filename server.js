@@ -24,17 +24,16 @@ app.get('/logs.html', (req, res) => res.sendFile(path.join(__dirname, 'logs.html
 // I. CẤU HÌNH HỆ THỐNG VÀ LOGGING
 // ==================================================================
 let GLOBAL_CONFIG = {
-    proxyKey: "ulhHONDSmaqepPClsbtMkp", // Thay Key Proxy của ông vào đây
+    proxyKey: "ulhHONDSmaqepPClsbtMkp", 
     cookies: {
-        tikfames: "",      // Cookie lấy từ tikfames.com
-        tikfollowers: ""   // Cookie lấy từ tikfollowers.com
+        tikfames: "",      
+        tikfollowers: ""   
     }
 };
 
 let BUFF_LOGS = { free: [], vip: [] };
 const MAX_LOG_ENTRIES = 100; 
 
-// Hàm thêm log (Ghi file async để không chặn luồng)
 function addLog(type, data) {
     const logEntry = {
         id: Date.now().toString(36) + Math.random().toString(36).substr(2, 5),
@@ -49,13 +48,11 @@ function addLog(type, data) {
 
     console.log(`📝 [${type.toUpperCase()}] ${logEntry.time_display} - ${data.username} - ${data.status ? '✅' : '❌'} ${data.message}`);
     
-    // Ghi file bất đồng bộ
     fs.writeFile('buff-logs.json', JSON.stringify(BUFF_LOGS, null, 2), (err) => {
         if (err) console.error('Lỗi lưu log:', err);
     });
 }
 
-// Đọc log cũ
 try {
     if (fs.existsSync('buff-logs.json')) {
         BUFF_LOGS = JSON.parse(fs.readFileSync('buff-logs.json', 'utf8'));
@@ -80,14 +77,20 @@ setInterval(() => {
 function isServerReady(server) { return SERVER_COOLDOWN[server] <= 0; }
 
 // ==================================================================
-// II. HÀM PROXY (CHỈ DÙNG CHO ZEFAME)
+// II. HÀM PROXY (LOGIC THÔNG MINH: SUCCESS -> ĐỔI IP)
 // ==================================================================
-async function getNewProxy() {
+let PROXY_STATE = {
+    ip: null,
+    lastUpdate: 0,
+    isUsed: false // Đánh dấu đã dùng thành công hay chưa
+};
+
+async function fetchProxyFromAPI() {
     try {
         if (!GLOBAL_CONFIG.proxyKey) return { success: false, msg: 'Chưa cấu hình Proxy Key' };
         
         const url = `https://proxyxoay.shop/api/get.php?key=${GLOBAL_CONFIG.proxyKey}`;
-        const response = await axios.get(url, { timeout: 10000 });
+        const response = await axios.get(url, { timeout: 15000 });
         const data = response.data;
 
         if (data.status === 100 && data.proxyhttp) {
@@ -98,14 +101,61 @@ async function getNewProxy() {
             const match = data.message.match(/Con (\d+)s/);
             return { success: false, wait: match ? parseInt(match[1]) : 60, msg: data.message };
         }
-        return { success: false, wait: 0, msg: data.message || 'Lỗi Proxy' };
+        return { success: false, wait: 0, msg: data.message || 'Lỗi Proxy API' };
     } catch (e) {
-        return { success: false, msg: 'Lỗi API Proxy: ' + e.message };
+        return { success: false, msg: 'Lỗi Net Proxy: ' + e.message };
     }
 }
 
+async function getZefameProxy() {
+    const now = Date.now();
+    const timeDiff = (now - PROXY_STATE.lastUpdate) / 1000;
+    const waitTime = 60; 
+
+    // Nếu proxy cũ đã buff thành công -> Bắt buộc lấy mới
+    if (PROXY_STATE.isUsed) {
+        if (timeDiff < waitTime) {
+            const remaining = Math.ceil(waitTime - timeDiff);
+            return { success: false, code: 'PROXY_COOLDOWN', msg: `Đang chờ đổi IP mới (${remaining}s)...`, wait: remaining };
+        }
+        
+        console.log('🔄 Proxy cũ đã xong nhiệm vụ, lấy cái mới...');
+        const result = await fetchProxyFromAPI();
+        
+        if (result.success) {
+            PROXY_STATE.ip = result.proxy;
+            PROXY_STATE.lastUpdate = Date.now();
+            PROXY_STATE.isUsed = false;
+            console.log('✅ New Proxy:', result.proxy);
+            return { success: true, proxy: result.proxy };
+        } else {
+            return result;
+        }
+    }
+
+    // Nếu chưa có proxy
+    if (!PROXY_STATE.ip) {
+        const result = await fetchProxyFromAPI();
+        if (result.success) {
+            PROXY_STATE.ip = result.proxy;
+            PROXY_STATE.lastUpdate = Date.now();
+            PROXY_STATE.isUsed = false;
+            return { success: true, proxy: result.proxy };
+        }
+        return result;
+    }
+
+    // Nếu có proxy mà chưa buff thành công -> Dùng lại
+    return { success: true, proxy: PROXY_STATE.ip };
+}
+
+function markProxyAsUsed() {
+    console.log('🚫 Đã buff thành công -> Đánh dấu bỏ IP này!');
+    PROXY_STATE.isUsed = true;
+}
+
 // ==================================================================
-// III. API BUFF ZEFAME (CÓ PROXY + RAW ERROR)
+// III. API BUFF ZEFAME (AUTO LINK + SMART PROXY + RAW ERROR)
 // ==================================================================
 const ZEFAME_HEADERS = {
     'authority': 'zefame-free.com',
@@ -120,39 +170,54 @@ const ZEFAME_HEADERS = {
 async function buffZefame(link) {
     if (!isServerReady('zefame')) return { status: false, code: 'COOLDOWN', msg: `Zefame chờ ${SERVER_COOLDOWN.zefame}s`, server: 'zefame' };
 
-    const pData = await getNewProxy();
-    if (!pData.success) return { status: false, code: 'PROXY_WAIT', msg: `Lỗi Proxy: ${pData.msg}`, wait_seconds: pData.wait || 30, server: 'zefame' };
+    const pData = await getZefameProxy();
+    
+    if (!pData.success) {
+        return { 
+            status: false, 
+            code: 'PROXY_WAIT', 
+            msg: pData.msg, 
+            wait_seconds: pData.wait || 10, 
+            server: 'zefame' 
+        };
+    }
     
     const httpsAgent = new HttpsProxyAgent(`http://${pData.proxy}`);
     
     try {
         const params = new URLSearchParams();
         params.append('service', '228'); 
-        params.append('link', link); // Link chuẩn của acc cần buff
+        params.append('link', link);
         params.append('uuid', uuidv4());
-        params.append('username', "user_" + Math.random().toString(36).substring(7)); // Fake user đi buff
+        params.append('username', "user_" + Math.random().toString(36).substring(7));
 
         const response = await axios.post('https://zefame-free.com/api_free.php?action=order', params, {
             headers: ZEFAME_HEADERS,
             httpsAgent: httpsAgent,
-            timeout: 20000
+            timeout: 60000
         });
 
         const data = response.data;
         const textRes = JSON.stringify(data).toLowerCase();
 
-        // 1. Success
+        // 1. Thành công -> Đánh dấu IP đã dùng
         if (textRes.includes('success') && textRes.includes('true')) {
+            markProxyAsUsed(); 
             return { status: true, msg: 'Zefame thành công!', server: 'zefame' };
         } 
         
-        // 2. Rate Limit
+        // 2. Rate Limit -> Cũng đánh dấu IP để lần sau đổi cái khác
         if (textRes.includes('wait') || textRes.includes('indisponible')) {
             updateCooldown('zefame', 600); 
+            markProxyAsUsed();
             return { status: false, code: 'RATE_LIMIT', msg: `Zefame Limit: ${JSON.stringify(data)}`, server: 'zefame' };
         }
 
-        // 3. Lỗi khác -> Trả về nguyên văn JSON
+        // 3. Lỗi Link Profile
+        if (textRes.includes('profil')) {
+             return { status: false, msg: `Zefame Lỗi Link: Phải dùng Link Profile!`, server: 'zefame', raw: data };
+        }
+
         return { 
             status: false, 
             msg: `Zefame Error: ${JSON.stringify(data)}`, 
@@ -171,7 +236,7 @@ async function buffZefame(link) {
 }
 
 // ==================================================================
-// IV. API BUFF VIP (TikFames / TikFollowers) - DIRECT + RAW ERROR
+// IV. API BUFF VIP (TIKFAMES/FOLLOWERS)
 // ==================================================================
 const VIP_SITES = {
     tikfames: {
@@ -200,7 +265,6 @@ async function buffVipSite(site, username) {
     const cookie = GLOBAL_CONFIG.cookies[site];
     if (!cookie) return { status: false, msg: `Thiếu cookie ${site}`, server: serverName };
 
-    // Header Fake như thật
     const headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Content-Type': 'application/json',
@@ -214,23 +278,20 @@ async function buffVipSite(site, username) {
         const searchPayload = { input: cleanUser, type: "getUserDetails" };
         if (site === 'tikfames') searchPayload.recaptchaToken = "fake_" + Math.random().toString(36); 
 
-        // --- BƯỚC 1: SEARCH ---
-        const res1 = await axios.post(cfg.search, searchPayload, { headers, timeout: 15000 });
+        const res1 = await axios.post(cfg.search, searchPayload, { headers, timeout: 30000 });
         
         if (!res1.data.success) {
-            if (JSON.stringify(res1.data).includes('login')) return { status: false, code: 'COOKIE_DIE', msg: 'Cookie Die (Cần lấy lại cookie)', server: serverName };
-            // Trả về nguyên văn lỗi search
+            if (JSON.stringify(res1.data).includes('login')) return { status: false, code: 'COOKIE_DIE', msg: 'Cookie Die (Login lại)', server: serverName };
             return { status: false, msg: `Search Error: ${JSON.stringify(res1.data)}`, server: serverName };
         }
 
-        await new Promise(r => setTimeout(r, 1000)); // Delay nhẹ
+        await new Promise(r => setTimeout(r, 1000)); 
 
-        // --- BƯỚC 2: PROCESS ---
-        const processPayload = { ...res1.data }; // Lấy data từ bước 1
+        const processPayload = { ...res1.data }; 
         processPayload.type = (site === 'tikfollowers') ? "followers" : "follow";
         if (site === 'tikfames') processPayload.recaptchaToken = searchPayload.recaptchaToken;
 
-        const res2 = await axios.post(cfg.process, processPayload, { headers, timeout: 20000 });
+        const res2 = await axios.post(cfg.process, processPayload, { headers, timeout: 60000 });
 
         if (res2.data.success) {
             return { status: true, msg: `${serverName} thành công!`, server: serverName };
@@ -241,32 +302,37 @@ async function buffVipSite(site, username) {
         if (msgStr.includes('wait') || msgStr.includes('minute') || msgStr.includes('second')) {
             let waitSeconds = 1800;
             const minMatch = msgStr.match(/(\d+)\s*minute/);
+            const secMatch = msgStr.match(/(\d+)\s*second/);
+            
             if (minMatch) waitSeconds = parseInt(minMatch[1]) * 60;
+            if (secMatch) waitSeconds += parseInt(secMatch[1]);
             
             updateCooldown(serverName, waitSeconds);
-            return { status: false, code: 'RATE_LIMIT', msg: `Rate Limit: ${JSON.stringify(res2.data)}`, server: serverName };
+            return { status: false, code: 'RATE_LIMIT', msg: `Đang chờ: ${minMatch ? minMatch[1] : 0}p ${secMatch ? secMatch[1] : 0}s`, server: serverName };
         }
 
-        // Trả về nguyên văn lỗi process
         return { status: false, msg: `Process Error: ${JSON.stringify(res2.data)}`, server: serverName };
 
     } catch (e) {
         const errorDetail = e.response ? e.response.data : e.message;
+        if (e.code === 'ECONNABORTED') return { status: false, msg: `Timeout: Server ${serverName} phản hồi quá lâu`, server: serverName };
         return { status: false, msg: `Lỗi Kết Nối ${serverName}: ${typeof errorDetail === 'object' ? JSON.stringify(errorDetail) : errorDetail}`, server: serverName };
     }
 }
 
 // ==================================================================
-// V. HÀM XỬ LÝ SONG SONG (Promise.all)
+// V. HÀM XỬ LÝ SONG SONG & HELPER
 // ==================================================================
+function generateProfileLink(inputUser) {
+    const cleanUser = inputUser.toString().trim().replace(/^@/, '');
+    return `https://www.tiktok.com/@${cleanUser}`;
+}
+
 async function buffAllServers(username, link = null, isVip = false) {
     const jobs = [];
-
-    // Chạy song song TikFames + TikFollowers
     jobs.push(buffVipSite('tikfames', username));
     jobs.push(buffVipSite('tikfollowers', username));
     
-    // Nếu là VIP mode thì chạy thêm Zefame
     if (isVip && link) {
         jobs.push(buffZefame(link));
     }
@@ -282,7 +348,7 @@ async function buffAllServers(username, link = null, isVip = false) {
 }
 
 // ==================================================================
-// VI. ENDPOINTS API
+// VI. ENDPOINTS
 // ==================================================================
 app.post('/api/free/buff', async (req, res) => {
     const { username } = req.body;
@@ -294,19 +360,58 @@ app.post('/api/free/buff', async (req, res) => {
 });
 
 app.post('/api/vip/buff', async (req, res) => {
-    const { link, username } = req.body;
-    if (!link || !username) return res.json({ status: false, msg: 'Thiếu info' });
+    const { username } = req.body; // Chỉ cần username
+    if (!username) return res.json({ status: false, msg: 'Thiếu username' });
 
-    const result = await buffAllServers(username, link, true);
-    addLog('vip', { username, link, status: result.status, message: result.msg, details: result.details });
+    const autoLink = generateProfileLink(username); // Tự tạo link cho Zefame
+    const result = await buffAllServers(username, autoLink, true);
+    
+    addLog('vip', { username, link: autoLink, status: result.status, message: result.msg, details: result.details });
     res.json(result);
 });
 
-// Endpoint lẻ để test từng cái
+// Admin Update
+app.post('/api/admin/update', (req, res) => {
+    const { type, value, site } = req.body;
+    if (type === 'proxy') {
+        GLOBAL_CONFIG.proxyKey = value.trim();
+        return res.json({ success: true, msg: "Updated Proxy Key" });
+    }
+    if (type === 'cookie') {
+        GLOBAL_CONFIG.cookies[site] = value.trim();
+        return res.json({ success: true, msg: `Updated Cookie ${site}` });
+    }
+    if (type === 'reset_cooldown') {
+        SERVER_COOLDOWN[value] = 0;
+        return res.json({ success: true, msg: `Reset cooldown ${value}` });
+    }
+    res.json({ success: false });
+});
+
+app.get('/api/admin/config', (req, res) => {
+    res.json({
+        proxyKey: GLOBAL_CONFIG.proxyKey,
+        cookies: GLOBAL_CONFIG.cookies,
+        cooldowns: SERVER_COOLDOWN,
+        proxyState: PROXY_STATE
+    });
+});
+
+app.get('/api/logs', (req, res) => {
+    const { type } = req.query;
+    if(type === 'free') res.json({logs: BUFF_LOGS.free});
+    else if(type === 'vip') res.json({logs: BUFF_LOGS.vip});
+    else res.json({logs: [...BUFF_LOGS.free, ...BUFF_LOGS.vip]});
+});
+
+// Endpoint test lẻ
 app.post('/api/buff/zefame', async (req, res) => {
-    const { link } = req.body;
-    if (!link) return res.json({ status: false, msg: 'Thiếu link' });
-    const result = await buffZefame(link);
+    const { username, link } = req.body;
+    let targetLink = link;
+    if (!targetLink && username) targetLink = generateProfileLink(username);
+    
+    if (!targetLink) return res.json({ status: false, msg: 'Thiếu link/username' });
+    const result = await buffZefame(targetLink);
     res.json(result);
 });
 
@@ -324,42 +429,7 @@ app.post('/api/buff/tikfollowers', async (req, res) => {
     res.json(result);
 });
 
-// Admin config endpoint
-app.post('/api/admin/update', (req, res) => {
-    const { type, value, site } = req.body;
-    if (type === 'proxy') {
-        GLOBAL_CONFIG.proxyKey = value.trim();
-        return res.json({ success: true, msg: "Updated Proxy Key" });
-    }
-    if (type === 'cookie') {
-        GLOBAL_CONFIG.cookies[site] = value.trim();
-        return res.json({ success: true, msg: `Updated Cookie ${site}` });
-    }
-    res.json({ success: false });
-});
-
-app.get('/api/admin/config', (req, res) => {
-    res.json({
-        proxyKey: GLOBAL_CONFIG.proxyKey,
-        cookies: GLOBAL_CONFIG.cookies,
-        cooldowns: SERVER_COOLDOWN
-    });
-});
-
-app.get('/api/servers/status', (req, res) => {
-    res.json(SERVER_COOLDOWN);
-});
-
-app.get('/api/logs', (req, res) => {
-    const { type } = req.query;
-    if(type === 'free') res.json({logs: BUFF_LOGS.free});
-    else if(type === 'vip') res.json({logs: BUFF_LOGS.vip});
-    else res.json({logs: [...BUFF_LOGS.free, ...BUFF_LOGS.vip]});
-});
-
 app.listen(PORT, () => {
-    console.log(`🚀 Server Tiệp Gà Cui đang chạy port ${PORT}`);
-    console.log(`- Zefame: Proxy + Fake User + Real Link`);
-    console.log(`- VIP Sites: Direct + Fake Token + Real Cookie`);
-    console.log(`- Error Handling: RAW JSON return`);
+    console.log(`🚀 Server Tiệp Gà Cui running on PORT ${PORT}`);
+    console.log(`- Final Stable Version`);
 });
