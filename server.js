@@ -1,3 +1,5 @@
+[file name]: server.js
+[file content begin]
 const express = require('express');
 const axios = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
@@ -5,6 +7,7 @@ const { v4: uuidv4 } = require('uuid');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,18 +18,21 @@ app.use(bodyParser.json());
 // ==================================================================
 // CẤU HÌNH ĐỂ CHẠY FILE TỪ THƯ MỤC GỐC
 // ==================================================================
-// 1. Trang chủ (index.html)
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// 2. Trang Admin (admin.html)
 app.get('/admin.html', (req, res) => {
     res.sendFile(path.join(__dirname, 'admin.html'));
 });
 
+// Thêm route cho trang log
+app.get('/logs.html', (req, res) => {
+    res.sendFile(path.join(__dirname, 'logs.html'));
+});
+
 // ==================================================================
-// I. CẤU HÌNH HỆ THỐNG (LƯU TRÊN RAM)
+// I. CẤU HÌNH HỆ THỐNG VÀ LOGGING
 // ==================================================================
 let GLOBAL_CONFIG = {
     proxyKey: "ulhHONDSmaqepPClsbtMkp", 
@@ -35,6 +41,93 @@ let GLOBAL_CONFIG = {
         tikfollowers: ""   
     }
 };
+
+// Biến lưu log
+let BUFF_LOGS = {
+    free: [],  // Log cho API free
+    vip: []    // Log cho API vip
+};
+const MAX_LOG_ENTRIES = 100; // Giới hạn số log tối đa
+
+// Hàm thêm log
+function addLog(type, data) {
+    const logEntry = {
+        id: Date.now() + Math.random().toString(36).substr(2, 9),
+        timestamp: new Date().toISOString(),
+        time_display: new Date().toLocaleTimeString('vi-VN'),
+        type: type, // 'free' hoặc 'vip'
+        ...data
+    };
+
+    // Thêm vào đầu mảng
+    BUFF_LOGS[type].unshift(logEntry);
+    
+    // Giới hạn số log
+    if (BUFF_LOGS[type].length > MAX_LOG_ENTRIES) {
+        BUFF_LOGS[type].pop();
+    }
+
+    console.log(`📝 [${type.toUpperCase()}] ${logEntry.time_display} - ${data.username} - ${data.status ? '✅' : '❌'} ${data.message}`);
+    
+    // Lưu log vào file (optional)
+    saveLogsToFile();
+}
+
+// Hàm lưu log vào file
+function saveLogsToFile() {
+    try {
+        fs.writeFileSync('buff-logs.json', JSON.stringify(BUFF_LOGS, null, 2));
+    } catch (error) {
+        console.error('Lỗi khi lưu log:', error);
+    }
+}
+
+// Đọc log từ file khi khởi động
+try {
+    if (fs.existsSync('buff-logs.json')) {
+        const data = fs.readFileSync('buff-logs.json', 'utf8');
+        BUFF_LOGS = JSON.parse(data);
+        console.log(`📂 Đã tải ${BUFF_LOGS.free.length + BUFF_LOGS.vip.length} log từ file`);
+    }
+} catch (error) {
+    console.log('Không đọc được file log, bắt đầu mới');
+}
+
+// Biến lưu thời gian chờ của từng server
+let SERVER_COOLDOWN = {
+    zefame: 0,
+    tikfames: 0,
+    tikfollowers: 0
+};
+
+// Hàm cập nhật thời gian chờ
+function updateCooldown(server, seconds) {
+    SERVER_COOLDOWN[server] = seconds;
+    console.log(`⏳ Server ${server} cooldown: ${seconds}s`);
+}
+
+// Hàm giảm thời gian chờ mỗi giây
+setInterval(() => {
+    Object.keys(SERVER_COOLDOWN).forEach(server => {
+        if (SERVER_COOLDOWN[server] > 0) {
+            SERVER_COOLDOWN[server] -= 1;
+        }
+    });
+}, 1000);
+
+// Kiểm tra server có sẵn sàng không
+function isServerReady(server) {
+    return SERVER_COOLDOWN[server] <= 0;
+}
+
+// Lấy thời gian chờ lớn nhất giữa các server
+function getMaxCooldown() {
+    return Math.max(
+        SERVER_COOLDOWN.zefame,
+        SERVER_COOLDOWN.tikfames,
+        SERVER_COOLDOWN.tikfollowers
+    );
+}
 
 async function getNewProxy() {
     try {
@@ -57,7 +150,7 @@ async function getNewProxy() {
 }
 
 // ==================================================================
-// II. API BUFF ZEFAME (FREE)
+// II. API BUFF ZEFAME
 // ==================================================================
 const ZEFAME_HEADERS = {
     'authority': 'zefame-free.com',
@@ -69,20 +162,29 @@ const ZEFAME_HEADERS = {
     'content-type': 'application/x-www-form-urlencoded; charset=UTF-8'
 };
 
-app.post('/api/zefame', async (req, res) => {
-    const { link } = req.body;
-    if (!link) return res.json({ status: false, msg: 'Thiếu link TikTok' });
+async function buffZefame(link) {
+    if (!isServerReady('zefame')) {
+        const waitTime = SERVER_COOLDOWN.zefame;
+        return { 
+            status: false, 
+            code: 'COOLDOWN', 
+            msg: `Zefame đang chờ ${waitTime}s`,
+            wait_seconds: waitTime,
+            server: 'zefame'
+        };
+    }
 
     let proxyAddress = null;
     const pData = await getNewProxy();
     
     if (!pData.success) {
-        return res.json({ 
+        return { 
             status: false, 
             code: 'PROXY_WAIT', 
             msg: pData.msg, 
-            wait_seconds: pData.wait || 30 
-        });
+            wait_seconds: pData.wait || 30,
+            server: 'zefame'
+        };
     }
     proxyAddress = pData.proxy;
 
@@ -108,17 +210,40 @@ app.post('/api/zefame', async (req, res) => {
         const textRes = JSON.stringify(data).toLowerCase();
 
         if (textRes.includes('success') && textRes.includes('true')) {
-            return res.json({ status: true, msg: 'Buff thành công!', proxy: proxyAddress, data: data });
+            return { 
+                status: true, 
+                msg: 'Buff Zefame thành công!', 
+                proxy: proxyAddress, 
+                data: data,
+                server: 'zefame'
+            };
         } else if (textRes.includes('wait') || textRes.includes('indisponible')) {
-            return res.json({ status: false, code: 'RATE_LIMIT', msg: 'Rate Limit (Chờ 12 phút)', wait_seconds: 720 });
+            const waitTime = 720;
+            updateCooldown('zefame', waitTime);
+            return { 
+                status: false, 
+                code: 'RATE_LIMIT', 
+                msg: `Zefame: Rate Limit (Chờ ${Math.floor(waitTime/60)} phút)`, 
+                wait_seconds: waitTime,
+                server: 'zefame'
+            };
         } else {
-            return res.json({ status: false, msg: 'Lỗi API Zefame', raw: data });
+            return { 
+                status: false, 
+                msg: 'Lỗi API Zefame', 
+                raw: data,
+                server: 'zefame'
+            };
         }
 
     } catch (e) {
-        return res.json({ status: false, msg: 'Lỗi Request: ' + e.message });
+        return { 
+            status: false, 
+            msg: 'Lỗi Request Zefame: ' + e.message,
+            server: 'zefame'
+        };
     }
-});
+}
 
 // ==================================================================
 // III. API BUFF VIP (TikFames / TikFollowers)
@@ -127,23 +252,40 @@ const VIP_SITES = {
     tikfames: {
         search: "https://tikfames.com/api/search",
         process: "https://tikfames.com/api/process",
-        origin: "https://tikfames.com"
+        origin: "https://tikfames.com",
+        serverName: 'tikfames'
     },
     tikfollowers: {
         search: "https://tikfollowers.com/api/search",
         process: "https://tikfollowers.com/api/process",
-        origin: "https://tikfollowers.com"
+        origin: "https://tikfollowers.com",
+        serverName: 'tikfollowers'
     }
 };
 
-app.post('/api/vip/buff', async (req, res) => {
-    let { site, username, cookie } = req.body; 
+async function buffVipSite(site, username, cookie = null) {
+    if (!VIP_SITES[site]) {
+        return { status: false, msg: 'Site không hợp lệ', server: site };
+    }
 
-    if (!VIP_SITES[site]) return res.json({ status: false, msg: 'Site không hợp lệ' });
+    const serverName = VIP_SITES[site].serverName;
+    
+    if (!isServerReady(serverName)) {
+        const waitTime = SERVER_COOLDOWN[serverName];
+        return { 
+            status: false, 
+            code: 'COOLDOWN', 
+            msg: `${serverName} đang chờ ${waitTime}s`,
+            wait_seconds: waitTime,
+            server: serverName
+        };
+    }
     
     if (!cookie) {
         cookie = GLOBAL_CONFIG.cookies[site];
-        if (!cookie) return res.json({ status: false, msg: `Server chưa có cookie cho ${site}. Vào Admin thêm đi!` });
+        if (!cookie) {
+            return { status: false, msg: `Server chưa có cookie cho ${site}. Vào Admin thêm đi!`, server: serverName };
+        }
     }
 
     const cfg = VIP_SITES[site];
@@ -164,9 +306,9 @@ app.post('/api/vip/buff', async (req, res) => {
         
         if (!res1.data.success) {
             if (JSON.stringify(res1.data).includes('login')) {
-                return res.json({ status: false, code: 'COOKIE_DIE', msg: 'Cookie đã chết!' });
+                return { status: false, code: 'COOKIE_DIE', msg: 'Cookie đã chết!', server: serverName };
             }
-            return res.json({ status: false, msg: res1.data.message || 'Lỗi tìm user' });
+            return { status: false, msg: res1.data.message || 'Lỗi tìm user', server: serverName };
         }
 
         await new Promise(r => setTimeout(r, 2000)); 
@@ -178,21 +320,321 @@ app.post('/api/vip/buff', async (req, res) => {
         const msg = (res2.data.message || "").toLowerCase();
 
         if (res2.data.success) {
-            return res.json({ status: true, msg: 'Buff VIP thành công!', data: res2.data });
+            return { 
+                status: true, 
+                msg: `Buff ${serverName} thành công!`, 
+                data: res2.data,
+                server: serverName
+            };
         } else if (msg.includes('wait') || msg.includes('minute')) {
-            const match = msg.match(/(\d+)\s*(?:minute)/);
-            return res.json({ status: false, code: 'RATE_LIMIT', wait_minutes: match ? match[1] : 30, msg: msg });
+            let waitMinutes = 30;
+            const minuteMatch = msg.match(/(\d+)\s*(?:minute|phút)/i);
+            const secondMatch = msg.match(/(\d+)\s*(?:second|giây)/i);
+            
+            if (minuteMatch) {
+                waitMinutes = parseInt(minuteMatch[1]);
+            } else if (secondMatch) {
+                waitMinutes = Math.ceil(parseInt(secondMatch[1]) / 60);
+            }
+            
+            const waitSeconds = waitMinutes * 60;
+            updateCooldown(serverName, waitSeconds);
+            
+            return { 
+                status: false, 
+                code: 'RATE_LIMIT', 
+                msg: `${serverName}: Rate Limit (Chờ ${waitMinutes} phút)`, 
+                wait_seconds: waitSeconds,
+                server: serverName
+            };
         } else {
-            return res.json({ status: false, msg: 'Lỗi Process', raw: res2.data });
+            return { status: false, msg: 'Lỗi Process', raw: res2.data, server: serverName };
         }
 
     } catch (e) {
-        return res.json({ status: false, msg: 'Lỗi Server VIP: ' + e.message });
+        return { status: false, msg: 'Lỗi Server VIP: ' + e.message, server: serverName };
     }
+}
+
+// ==================================================================
+// IV. HÀM XỬ LÝ BUFF ĐỒNG BỘ
+// ==================================================================
+async function buffAllServers(username, link = null, isVip = false) {
+    const results = [];
+    const serversToBuff = isVip 
+        ? ['zefame', 'tikfames', 'tikfollowers']
+        : ['tikfames', 'tikfollowers'];
+    
+    const maxCooldown = getMaxCooldown();
+    
+    if (maxCooldown > 0) {
+        return {
+            status: false,
+            code: 'ALL_COOLDOWN',
+            msg: `Tất cả servers đang chờ ${maxCooldown}s`,
+            wait_seconds: maxCooldown,
+            cooldowns: { ...SERVER_COOLDOWN },
+            details: serversToBuff.map(server => ({
+                server,
+                wait: SERVER_COOLDOWN[server],
+                ready: isServerReady(server)
+            }))
+        };
+    }
+
+    for (const server of serversToBuff) {
+        let result;
+        
+        if (server === 'zefame' && link) {
+            result = await buffZefame(link);
+        } else if (server === 'tikfames' || server === 'tikfollowers') {
+            result = await buffVipSite(server, username);
+        } else {
+            continue;
+        }
+        
+        results.push(result);
+        
+        if (result.code === 'RATE_LIMIT' || result.code === 'COOLDOWN') {
+            const waitTime = result.wait_seconds || 60;
+            serversToBuff.forEach(s => {
+                if (SERVER_COOLDOWN[s] < waitTime) {
+                    updateCooldown(s, waitTime);
+                }
+            });
+            
+            return {
+                status: false,
+                code: 'PARTIAL_COOLDOWN',
+                msg: `Server ${result.server} bị rate limit, tất cả servers chờ ${waitTime}s`,
+                wait_seconds: waitTime,
+                completed: results.filter(r => r.status).length,
+                total: serversToBuff.length,
+                blocking_server: result.server,
+                details: results
+            };
+        }
+        
+        if (server !== serversToBuff[serversToBuff.length - 1]) {
+            await new Promise(r => setTimeout(r, 1000));
+        }
+    }
+
+    const successCount = results.filter(r => r.status === true).length;
+    
+    return {
+        status: successCount > 0,
+        msg: `${isVip ? 'VIP' : 'Free'} Buff: ${successCount}/${results.length} thành công`,
+        total: results.length,
+        success: successCount,
+        failed: results.length - successCount,
+        cooldowns: { ...SERVER_COOLDOWN },
+        details: results
+    };
+}
+
+// ==================================================================
+// V. ENDPOINT FREE (CHỈ DÙNG 2 API VIP)
+// ==================================================================
+app.post('/api/free/buff', async (req, res) => {
+    const { username } = req.body;
+    
+    if (!username) {
+        return res.json({ status: false, msg: 'Thiếu username TikTok' });
+    }
+
+    const result = await buffAllServers(username, null, false);
+    
+    // Thêm log
+    addLog('free', {
+        username: username,
+        status: result.status,
+        message: result.msg,
+        success_count: result.success || 0,
+        total_servers: result.total || 2,
+        details: result.details || [],
+        wait_time: result.wait_seconds || 0
+    });
+    
+    res.json(result);
 });
 
 // ==================================================================
-// IV. ADMIN PANEL API
+// VI. ENDPOINT VIP/PAID (DÙNG CẢ 3 API)
+// ==================================================================
+app.post('/api/vip/buff', async (req, res) => {
+    const { link, username } = req.body;
+    
+    if (!link && !username) {
+        return res.json({ status: false, msg: 'Thiếu link hoặc username TikTok' });
+    }
+
+    const result = await buffAllServers(username, link, true);
+    
+    // Thêm log
+    addLog('vip', {
+        username: username,
+        link: link || 'Không có link',
+        status: result.status,
+        message: result.msg,
+        success_count: result.success || 0,
+        total_servers: result.total || 3,
+        details: result.details || [],
+        wait_time: result.wait_seconds || 0
+    });
+    
+    res.json(result);
+});
+
+// ==================================================================
+// VII. ENDPOINT RIÊNG CHO TỪNG SERVICE
+// ==================================================================
+app.post('/api/buff/zefame', async (req, res) => {
+    const { link, username } = req.body;
+    if (!link) return res.json({ status: false, msg: 'Thiếu link TikTok' });
+    
+    if (!isServerReady('zefame')) {
+        const waitTime = SERVER_COOLDOWN.zefame;
+        return res.json({
+            status: false,
+            code: 'COOLDOWN',
+            msg: `Zefame đang chờ ${waitTime}s`,
+            wait_seconds: waitTime,
+            server: 'zefame'
+        });
+    }
+    
+    const result = await buffZefame(link);
+    res.json(result);
+});
+
+app.post('/api/buff/tikfames', async (req, res) => {
+    const { username } = req.body;
+    if (!username) return res.json({ status: false, msg: 'Thiếu username TikTok' });
+    
+    if (!isServerReady('tikfames')) {
+        const waitTime = SERVER_COOLDOWN.tikfames;
+        return res.json({
+            status: false,
+            code: 'COOLDOWN',
+            msg: `TikFames đang chờ ${waitTime}s`,
+            wait_seconds: waitTime,
+            server: 'tikfames'
+        });
+    }
+    
+    const result = await buffVipSite('tikfames', username);
+    res.json(result);
+});
+
+app.post('/api/buff/tikfollowers', async (req, res) => {
+    const { username } = req.body;
+    if (!username) return res.json({ status: false, msg: 'Thiếu username TikTok' });
+    
+    if (!isServerReady('tikfollowers')) {
+        const waitTime = SERVER_COOLDOWN.tikfollowers;
+        return res.json({
+            status: false,
+            code: 'COOLDOWN',
+            msg: `TikFollowers đang chờ ${waitTime}s`,
+            wait_seconds: waitTime,
+            server: 'tikfollowers'
+        });
+    }
+    
+    const result = await buffVipSite('tikfollowers', username);
+    res.json(result);
+});
+
+// ==================================================================
+// VIII. API LẤY LOG
+// ==================================================================
+app.get('/api/logs', (req, res) => {
+    const { type, limit } = req.query;
+    let logs = [];
+    
+    if (type === 'free') {
+        logs = BUFF_LOGS.free;
+    } else if (type === 'vip') {
+        logs = BUFF_LOGS.vip;
+    } else {
+        // Lấy tất cả log, gộp và sort theo thời gian
+        logs = [...BUFF_LOGS.free, ...BUFF_LOGS.vip]
+            .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    }
+    
+    // Giới hạn số lượng log
+    const logLimit = parseInt(limit) || 50;
+    const limitedLogs = logs.slice(0, logLimit);
+    
+    res.json({
+        success: true,
+        count: limitedLogs.length,
+        total_free: BUFF_LOGS.free.length,
+        total_vip: BUFF_LOGS.vip.length,
+        logs: limitedLogs
+    });
+});
+
+// Xóa log
+app.delete('/api/logs', (req, res) => {
+    const { type } = req.body;
+    
+    if (type === 'free') {
+        BUFF_LOGS.free = [];
+        res.json({ success: true, msg: 'Đã xóa tất cả log free' });
+    } else if (type === 'vip') {
+        BUFF_LOGS.vip = [];
+        res.json({ success: true, msg: 'Đã xóa tất cả log vip' });
+    } else {
+        BUFF_LOGS.free = [];
+        BUFF_LOGS.vip = [];
+        res.json({ success: true, msg: 'Đã xóa tất cả log' });
+    }
+    
+    saveLogsToFile();
+});
+
+// ==================================================================
+// IX. ENDPOINT KIỂM TRA TRẠNG THÁI SERVERS
+// ==================================================================
+app.get('/api/servers/status', (req, res) => {
+    res.json({
+        timestamp: new Date().toISOString(),
+        servers: {
+            zefame: {
+                ready: isServerReady('zefame'),
+                cooldown: SERVER_COOLDOWN.zefame,
+                message: SERVER_COOLDOWN.zefame > 0 
+                    ? `Chờ ${SERVER_COOLDOWN.zefame}s` 
+                    : 'Sẵn sàng'
+            },
+            tikfames: {
+                ready: isServerReady('tikfames'),
+                cooldown: SERVER_COOLDOWN.tikfames,
+                message: SERVER_COOLDOWN.tikfames > 0 
+                    ? `Chờ ${SERVER_COOLDOWN.tikfames}s` 
+                    : 'Sẵn sàng'
+            },
+            tikfollowers: {
+                ready: isServerReady('tikfollowers'),
+                cooldown: SERVER_COOLDOWN.tikfollowers,
+                message: SERVER_COOLDOWN.tikfollowers > 0 
+                    ? `Chờ ${SERVER_COOLDOWN.tikfollowers}s` 
+                    : 'Sẵn sàng'
+            }
+        },
+        max_cooldown: getMaxCooldown(),
+        all_ready: getMaxCooldown() <= 0,
+        log_stats: {
+            free_logs: BUFF_LOGS.free.length,
+            vip_logs: BUFF_LOGS.vip.length
+        }
+    });
+});
+
+// ==================================================================
+// X. ADMIN PANEL API
 // ==================================================================
 app.get('/api/admin/config', (req, res) => {
     res.json({
@@ -200,6 +642,19 @@ app.get('/api/admin/config', (req, res) => {
         cookies: {
             tikfames: GLOBAL_CONFIG.cookies.tikfames ? "Live (Đã lưu)" : "Empty",
             tikfollowers: GLOBAL_CONFIG.cookies.tikfollowers ? "Live (Đã lưu)" : "Empty"
+        },
+        cooldowns: SERVER_COOLDOWN,
+        log_stats: {
+            free: BUFF_LOGS.free.length,
+            vip: BUFF_LOGS.vip.length
+        },
+        endpoints: {
+            free: '/api/free/buff (chỉ 2 API VIP)',
+            vip: '/api/vip/buff (3 API: Zefame + 2 VIP)',
+            individual: '/api/buff/:service',
+            status: '/api/servers/status',
+            logs: '/api/logs',
+            logs_page: '/logs.html'
         }
     });
 });
@@ -214,13 +669,39 @@ app.post('/api/admin/update', (req, res) => {
         GLOBAL_CONFIG.cookies[site] = value.trim();
         return res.json({ success: true, msg: `Updated Cookie ${site}!` });
     }
+    if (type === 'reset_cooldown' && SERVER_COOLDOWN[value] !== undefined) {
+        SERVER_COOLDOWN[value] = 0;
+        return res.json({ success: true, msg: `Reset cooldown ${value}!` });
+    }
     res.json({ success: false, msg: "Sai tham số" });
 });
 
 // ==================================================================
-// V. KEEP-ALIVE
+// XI. KEEP-ALIVE & HEALTH CHECK
 // ==================================================================
 app.get('/ping', (req, res) => res.send('Pong!'));
+
+app.get('/status', (req, res) => {
+    res.json({
+        status: 'running',
+        server_time: new Date().toISOString(),
+        cooldowns: SERVER_COOLDOWN,
+        log_stats: {
+            free: BUFF_LOGS.free.length,
+            vip: BUFF_LOGS.vip.length
+        },
+        endpoints: [
+            { path: '/api/free/buff', method: 'POST', desc: 'Free - chỉ 2 API VIP' },
+            { path: '/api/vip/buff', method: 'POST', desc: 'VIP - cả 3 API' },
+            { path: '/api/buff/zefame', method: 'POST', desc: 'Chỉ Zefame' },
+            { path: '/api/buff/tikfames', method: 'POST', desc: 'Chỉ TikFames' },
+            { path: '/api/buff/tikfollowers', method: 'POST', desc: 'Chỉ TikFollowers' },
+            { path: '/api/servers/status', method: 'GET', desc: 'Kiểm tra trạng thái servers' },
+            { path: '/api/logs', method: 'GET', desc: 'Lấy log buff' },
+            { path: '/logs.html', method: 'GET', desc: 'Giao diện xem log' }
+        ]
+    });
+});
 
 function keepAlive() {
     const url = process.env.RENDER_EXTERNAL_URL ? `${process.env.RENDER_EXTERNAL_URL}/ping` : `http://localhost:${PORT}/ping`;
@@ -230,5 +711,17 @@ setInterval(keepAlive, 10 * 60 * 1000);
 
 app.listen(PORT, () => {
     console.log(`✅ Server running on PORT ${PORT}`);
+    console.log(`🔗 Free API: POST /api/free/buff`);
+    console.log(`💰 VIP API: POST /api/vip/buff`);
+    console.log(`📊 Server Status: GET /api/servers/status`);
+    console.log(`📝 Logs Page: /logs.html`);
+    console.log(`🔧 Admin: /admin.html`);
+    console.log(`📂 Logs loaded: Free(${BUFF_LOGS.free.length}), VIP(${BUFF_LOGS.vip.length})`);
+    
+    setInterval(() => {
+        console.log(`⏳ Cooldowns - Zefame: ${SERVER_COOLDOWN.zefame}s, TikFames: ${SERVER_COOLDOWN.tikfames}s, TikFollowers: ${SERVER_COOLDOWN.tikfollowers}s`);
+    }, 30000);
+    
     setTimeout(keepAlive, 5000);
 });
+[file content end]
