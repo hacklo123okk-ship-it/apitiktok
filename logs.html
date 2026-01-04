@@ -1,0 +1,598 @@
+[file name]: logs.html
+[file content begin]
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📊 Buff Logs - TikTok Buff System</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root {
+            --free-color: #28a745;
+            --vip-color: #ff6b00;
+            --success-bg: #d4edda;
+            --error-bg: #f8d7da;
+            --warning-bg: #fff3cd;
+        }
+        body {
+            background-color: #f8f9fa;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        .navbar {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .log-container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .stats-card {
+            border-radius: 15px;
+            border: none;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+            transition: transform 0.3s;
+        }
+        .stats-card:hover {
+            transform: translateY(-5px);
+        }
+        .log-card {
+            border-left: 5px solid;
+            border-radius: 10px;
+            margin-bottom: 15px;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.05);
+            transition: all 0.3s;
+        }
+        .log-card:hover {
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        .log-free {
+            border-left-color: var(--free-color);
+        }
+        .log-vip {
+            border-left-color: var(--vip-color);
+        }
+        .log-success {
+            background-color: var(--success-bg);
+        }
+        .log-error {
+            background-color: var(--error-bg);
+        }
+        .log-wait {
+            background-color: var(--warning-bg);
+        }
+        .server-badge {
+            font-size: 0.75em;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-weight: 600;
+        }
+        .badge-zefame { background: linear-gradient(135deg, #8e2de2, #4a00e0); }
+        .badge-tikfames { background: linear-gradient(135deg, #00b09b, #96c93d); }
+        .badge-tikfollowers { background: linear-gradient(135deg, #ff416c, #ff4b2b); }
+        .time-badge {
+            background-color: #6c757d;
+            color: white;
+            font-size: 0.7em;
+        }
+        .tab-btn {
+            border: none;
+            padding: 10px 25px;
+            font-weight: 600;
+            border-radius: 8px 8px 0 0;
+            transition: all 0.3s;
+        }
+        .tab-btn.active {
+            background-color: white;
+            box-shadow: 0 -2px 5px rgba(0,0,0,0.05);
+        }
+        .tab-content {
+            background: white;
+            border-radius: 0 15px 15px 15px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.08);
+            min-height: 500px;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        .refresh-btn {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            z-index: 1000;
+            transition: all 0.3s;
+        }
+        .refresh-btn:hover {
+            transform: rotate(45deg);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+        }
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #6c757d;
+        }
+        .empty-state i {
+            font-size: 4em;
+            margin-bottom: 20px;
+            opacity: 0.5;
+        }
+        .filter-badge {
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .filter-badge:hover {
+            opacity: 0.8;
+            transform: scale(1.05);
+        }
+        .log-details {
+            font-size: 0.85em;
+            color: #666;
+            background: rgba(0,0,0,0.03);
+            border-radius: 5px;
+            padding: 10px;
+            margin-top: 10px;
+        }
+        .cooldown-warning {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.6; }
+            100% { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Navbar -->
+    <nav class="navbar navbar-dark mb-4">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                <i class="fas fa-chart-line me-2"></i>
+                <strong>📊 Buff Logs System</strong>
+            </a>
+            <div class="d-flex">
+                <a href="/" class="btn btn-outline-light btn-sm me-2">
+                    <i class="fas fa-home"></i> Home
+                </a>
+                <a href="/admin.html" class="btn btn-outline-light btn-sm">
+                    <i class="fas fa-cog"></i> Admin
+                </a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container log-container">
+        <!-- Header -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <h2 class="mb-3"><i class="fas fa-history me-2"></i> Buff Logs</h2>
+                <p class="text-muted">Theo dõi lịch sử buff từ API Free và API VIP</p>
+            </div>
+        </div>
+
+        <!-- Stats Cards -->
+        <div class="row mb-4">
+            <div class="col-md-4 mb-3">
+                <div class="card stats-card h-100">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="text-muted mb-1">API Free Logs</h6>
+                                <h2 id="free-count" class="mb-0">0</h2>
+                                <span class="badge bg-success" id="free-success">0 thành công</span>
+                            </div>
+                            <div class="display-4 text-success">
+                                <i class="fas fa-users"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4 mb-3">
+                <div class="card stats-card h-100">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="text-muted mb-1">API VIP Logs</h6>
+                                <h2 id="vip-count" class="mb-0">0</h2>
+                                <span class="badge bg-warning text-dark" id="vip-success">0 thành công</span>
+                            </div>
+                            <div class="display-4 text-warning">
+                                <i class="fas fa-crown"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4 mb-3">
+                <div class="card stats-card h-100">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="text-muted mb-1">Servers Status</h6>
+                                <div id="servers-status">
+                                    <small class="text-muted">Đang tải...</small>
+                                </div>
+                            </div>
+                            <div class="display-4 text-primary">
+                                <i class="fas fa-server"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="row mb-3">
+            <div class="col-12">
+                <div class="d-flex">
+                    <button class="tab-btn active" data-tab="all">
+                        <i class="fas fa-list me-2"></i>Tất cả
+                    </button>
+                    <button class="tab-btn" data-tab="free">
+                        <i class="fas fa-users me-2"></i>API Free
+                    </button>
+                    <button class="tab-btn" data-tab="vip">
+                        <i class="fas fa-crown me-2"></i>API VIP
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Filters -->
+        <div class="row mb-3">
+            <div class="col-12">
+                <div class="d-flex flex-wrap gap-2 align-items-center">
+                    <small class="text-muted me-2">Lọc theo:</small>
+                    <span class="badge filter-badge bg-success" data-filter="status:success">
+                        <i class="fas fa-check me-1"></i>Thành công
+                    </span>
+                    <span class="badge filter-badge bg-danger" data-filter="status:error">
+                        <i class="fas fa-times me-1"></i>Thất bại
+                    </span>
+                    <span class="badge filter-badge bg-warning text-dark" data-filter="status:wait">
+                        <i class="fas fa-clock me-1"></i>Đang chờ
+                    </span>
+                    <button class="btn btn-sm btn-outline-secondary ms-auto" id="clear-filters">
+                        <i class="fas fa-times me-1"></i>Xóa lọc
+                    </button>
+                    <button class="btn btn-sm btn-danger" id="clear-logs">
+                        <i class="fas fa-trash me-1"></i>Xóa log
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Logs Content -->
+        <div class="row">
+            <div class="col-12">
+                <div class="tab-content p-4" id="logs-content">
+                    <!-- Logs will be loaded here -->
+                    <div class="empty-state" id="empty-state">
+                        <i class="fas fa-inbox"></i>
+                        <h5>Chưa có log nào</h5>
+                        <p class="text-muted">Khi có request buff, log sẽ hiển thị tại đây</p>
+                    </div>
+                    <div id="logs-list"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Refresh Button -->
+    <button class="refresh-btn" id="refresh-logs">
+        <i class="fas fa-sync-alt"></i>
+    </button>
+
+    <!-- Server Status Modal -->
+    <div class="modal fade" id="statusModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-server me-2"></i>Servers Status</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="status-modal-body">
+                    <!-- Server status will be loaded here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let currentTab = 'all';
+        let currentFilter = null;
+        let autoRefresh = true;
+        let refreshInterval;
+
+        // Format time
+        function formatTime(isoTime) {
+            const date = new Date(isoTime);
+            return date.toLocaleTimeString('vi-VN');
+        }
+
+        // Format wait time
+        function formatWaitTime(seconds) {
+            if (!seconds) return '';
+            const mins = Math.floor(seconds / 60);
+            const secs = seconds % 60;
+            if (mins > 0) {
+                return `${mins}p${secs > 0 ? ` ${secs}s` : ''}`;
+            }
+            return `${secs}s`;
+        }
+
+        // Get status class
+        function getStatusClass(log) {
+            if (log.status) return 'log-success';
+            if (log.message?.includes('chờ') || log.wait_time > 0) return 'log-wait';
+            return 'log-error';
+        }
+
+        // Get status icon
+        function getStatusIcon(log) {
+            if (log.status) return '✅';
+            if (log.message?.includes('chờ') || log.wait_time > 0) return '⏳';
+            return '❌';
+        }
+
+        // Get server badges
+        function getServerBadges(details) {
+            if (!details || !Array.isArray(details)) return '';
+            
+            let badges = '';
+            details.forEach(detail => {
+                if (detail.server) {
+                    const serverName = detail.server;
+                    const statusIcon = detail.status ? '✓' : '✗';
+                    badges += `<span class="badge server-badge badge-${serverName} me-1" title="${detail.msg || ''}">
+                        ${serverName} ${statusIcon}
+                    </span>`;
+                }
+            });
+            return badges;
+        }
+
+        // Render log item
+        function renderLogItem(log) {
+            const statusClass = getStatusClass(log);
+            const statusIcon = getStatusIcon(log);
+            const serverBadges = getServerBadges(log.details);
+            const waitTime = log.wait_time ? formatWaitTime(log.wait_time) : '';
+            
+            return `
+                <div class="log-card ${log.type === 'free' ? 'log-free' : 'log-vip'} ${statusClass}" 
+                     data-log-id="${log.id}"
+                     data-status="${log.status ? 'success' : log.wait_time > 0 ? 'wait' : 'error'}"
+                     data-type="${log.type}">
+                    <div class="p-3">
+                        <div class="d-flex justify-content-between align-items-start mb-2">
+                            <div>
+                                <h6 class="mb-1">
+                                    ${statusIcon} 
+                                    <strong>${log.username}</strong>
+                                    ${log.type === 'vip' ? '<span class="badge bg-warning text-dark ms-2">VIP</span>' : ''}
+                                    ${log.wait_time > 0 ? `<span class="badge bg-warning text-dark ms-2 cooldown-warning">⏳ ${waitTime}</span>` : ''}
+                                </h6>
+                                <div class="mb-2">
+                                    ${serverBadges}
+                                </div>
+                                <p class="mb-1">${log.message}</p>
+                                ${log.link && log.link !== 'Không có link' ? 
+                                    `<small class="text-muted"><i class="fas fa-link me-1"></i>${log.link}</small>` : ''}
+                            </div>
+                            <div class="text-end">
+                                <small class="text-muted d-block">${log.time_display || formatTime(log.timestamp)}</small>
+                                <small class="badge time-badge">${log.success_count || 0}/${log.total_servers || 2} server</small>
+                            </div>
+                        </div>
+                        ${log.details && log.details.length > 0 ? `
+                            <div class="log-details mt-2">
+                                <small class="d-block mb-1"><strong>Chi tiết:</strong></small>
+                                ${log.details.map(detail => `
+                                    <div class="d-flex justify-content-between border-bottom pb-1 mb-1">
+                                        <span><strong>${detail.server}:</strong> ${detail.msg || 'No message'}</span>
+                                        <span class="badge ${detail.status ? 'bg-success' : 'bg-danger'}">
+                                            ${detail.status ? 'Thành công' : 'Thất bại'}
+                                        </span>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        // Load logs
+        async function loadLogs() {
+            try {
+                const response = await fetch(`/api/logs?type=${currentTab === 'all' ? '' : currentTab}&limit=100`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Update stats
+                    document.getElementById('free-count').textContent = data.total_free;
+                    document.getElementById('vip-count').textContent = data.total_vip;
+                    
+                    // Calculate success counts
+                    const freeSuccess = BUFF_LOGS?.free?.filter(l => l.status).length || 0;
+                    const vipSuccess = BUFF_LOGS?.vip?.filter(l => l.status).length || 0;
+                    document.getElementById('free-success').textContent = `${freeSuccess} thành công`;
+                    document.getElementById('vip-success').textContent = `${vipSuccess} thành công`;
+                    
+                    // Render logs
+                    const logsList = document.getElementById('logs-list');
+                    const emptyState = document.getElementById('empty-state');
+                    
+                    if (data.logs.length === 0) {
+                        logsList.innerHTML = '';
+                        emptyState.style.display = 'block';
+                    } else {
+                        emptyState.style.display = 'none';
+                        
+                        let filteredLogs = data.logs;
+                        
+                        // Apply filter
+                        if (currentFilter) {
+                            const [filterType, filterValue] = currentFilter.split(':');
+                            if (filterType === 'status') {
+                                filteredLogs = filteredLogs.filter(log => {
+                                    if (filterValue === 'success') return log.status;
+                                    if (filterValue === 'error') return !log.status && (!log.wait_time || log.wait_time === 0);
+                                    if (filterValue === 'wait') return log.wait_time > 0;
+                                    return true;
+                                });
+                            }
+                        }
+                        
+                        logsList.innerHTML = filteredLogs.map(renderLogItem).join('');
+                    }
+                }
+            } catch (error) {
+                console.error('Lỗi khi tải log:', error);
+            }
+        }
+
+        // Load server status
+        async function loadServerStatus() {
+            try {
+                const response = await fetch('/api/servers/status');
+                const data = await response.json();
+                
+                const statusHtml = `
+                    ${Object.entries(data.servers).map(([server, info]) => `
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <span><strong>${server}:</strong></span>
+                            <span class="badge ${info.ready ? 'bg-success' : 'bg-warning text-dark'}">
+                                ${info.message}
+                            </span>
+                        </div>
+                    `).join('')}
+                    <hr>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <span><strong>Tất cả servers:</strong></span>
+                        <span class="badge ${data.all_ready ? 'bg-success' : 'bg-warning text-dark'}">
+                            ${data.all_ready ? 'Sẵn sàng' : `Chờ ${data.max_cooldown}s`}
+                        </span>
+                    </div>
+                `;
+                
+                document.getElementById('servers-status').innerHTML = statusHtml;
+                
+                // Update modal
+                document.getElementById('status-modal-body').innerHTML = statusHtml;
+            } catch (error) {
+                console.error('Lỗi khi tải server status:', error);
+            }
+        }
+
+        // Clear logs
+        async function clearLogs(type) {
+            if (!confirm(`Bạn có chắc muốn xóa tất cả log${type ? ' ' + type : ''}?`)) return;
+            
+            try {
+                const response = await fetch('/api/logs', {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ type: currentTab === 'all' ? undefined : currentTab })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    alert(data.msg);
+                    loadLogs();
+                }
+            } catch (error) {
+                console.error('Lỗi khi xóa log:', error);
+            }
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            // Load initial data
+            loadLogs();
+            loadServerStatus();
+            
+            // Set up auto-refresh
+            refreshInterval = setInterval(() => {
+                if (autoRefresh) {
+                    loadLogs();
+                    loadServerStatus();
+                }
+            }, 5000); // Refresh every 5 seconds
+            
+            // Tab switching
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                    this.classList.add('active');
+                    currentTab = this.dataset.tab;
+                    loadLogs();
+                });
+            });
+            
+            // Filter badges
+            document.querySelectorAll('.filter-badge').forEach(badge => {
+                badge.addEventListener('click', function() {
+                    currentFilter = this.dataset.filter;
+                    loadLogs();
+                });
+            });
+            
+            // Clear filters button
+            document.getElementById('clear-filters').addEventListener('click', function() {
+                currentFilter = null;
+                loadLogs();
+            });
+            
+            // Clear logs button
+            document.getElementById('clear-logs').addEventListener('click', function() {
+                clearLogs();
+            });
+            
+            // Refresh button
+            document.getElementById('refresh-logs').addEventListener('click', function() {
+                loadLogs();
+                loadServerStatus();
+                this.classList.add('fa-spin');
+                setTimeout(() => this.classList.remove('fa-spin'), 500);
+            });
+            
+            // Server status click
+            document.getElementById('servers-status').addEventListener('click', function() {
+                const modal = new bootstrap.Modal(document.getElementById('statusModal'));
+                modal.show();
+            });
+            
+            // Auto-refresh toggle
+            document.getElementById('logs-content').addEventListener('mouseenter', () => autoRefresh = false);
+            document.getElementById('logs-content').addEventListener('mouseleave', () => autoRefresh = true);
+        });
+        
+        // Global BUFF_LOGS for stats calculation
+        let BUFF_LOGS = { free: [], vip: [] };
+        
+        // Fetch initial logs data for stats
+        fetch('/api/logs')
+            .then(res => res.json())
+            .then(data => {
+                if (data.logs) {
+                    // Group logs by type for stats
+                    BUFF_LOGS.free = data.logs.filter(log => log.type === 'free');
+                    BUFF_LOGS.vip = data.logs.filter(log => log.type === 'vip');
+                }
+            });
+    </script>
+</body>
+</html>
+[file content end]
