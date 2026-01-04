@@ -1,5 +1,3 @@
-[file name]: server.js
-[file content begin]
 const express = require('express');
 const axios = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
