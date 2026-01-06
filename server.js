@@ -4,352 +4,343 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 const { v4: uuidv4 } = require('uuid');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const TIMEOUT_MS = 180000; // 🔥 180 GIÂY (3 PHÚT)
-
-app.use(cors());
-app.use(bodyParser.json());
+const ADMIN_PASS = "admin123"; 
 
 // ==================================================================
-// CẤU HÌNH & CONFIG
+// 1. CẤU HÌNH DỊCH VỤ (SERVICE MAPPING)
+// Web chỉ cần gửi service ID (ví dụ: 1, 2, 3) cho chuẩn
 // ==================================================================
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
-app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
-app.get('/logs.html', (req, res) => res.sendFile(path.join(__dirname, 'logs.html')));
+const SERVICE_MAP = {
+    '1': { type: 'follow', name: 'Zefame Follow', server: 'zefame' },
+    '2': { type: 'view',   name: 'Zefame View',   server: 'zefame_views' },
+    '3': { type: 'heart',  name: 'Zefame Heart',  server: 'zefame_hearts' },
+    '4': { type: 'vip',    name: 'VIP Follow',    server: 'vip' } // TikFames + TikFollowers
+};
 
 let GLOBAL_CONFIG = {
-    proxyKey: "ulhHONDSmaqepPClsbtMkp", 
-    cookies: {
-        tikfames: "",      
-        tikfollowers: ""   
-    }
+    proxyKey: "ulhHONDSmaqepPClsbtMkp",
+    cookies: { tikfames: "", tikfollowers: "" }
 };
 
-let BUFF_LOGS = { free: [], vip: [] };
-const MAX_LOG_ENTRIES = 100; 
+// ==================================================================
+// 2. DATABASE ĐƠN HÀNG (JSON FILE)
+// Lưu trạng thái thật để Web check
+// ==================================================================
+const DB_FILE = 'orders.json';
+let ORDERS_DB = [];
 
-function addLog(type, data) {
-    const logEntry = {
-        id: Date.now().toString(36) + Math.random().toString(36).substr(2, 5),
-        timestamp: new Date().toISOString(),
-        time_display: new Date().toLocaleTimeString('vi-VN'),
-        type: type,
-        ...data
-    };
-    BUFF_LOGS[type].unshift(logEntry);
-    if (BUFF_LOGS[type].length > MAX_LOG_ENTRIES) BUFF_LOGS[type].pop();
-    console.log(`📝 [${type.toUpperCase()}] ${logEntry.time_display} - ${data.username} - ${data.status ? '✅' : '❌'} ${data.message}`);
-    fs.writeFile('buff-logs.json', JSON.stringify(BUFF_LOGS, null, 2), (err) => { if (err) console.error('Lỗi log:', err); });
-}
-
+// Load DB khi khởi động
 try {
-    if (fs.existsSync('buff-logs.json')) {
-        BUFF_LOGS = JSON.parse(fs.readFileSync('buff-logs.json', 'utf8'));
-    }
-} catch (e) {}
+    if (fs.existsSync(DB_FILE)) ORDERS_DB = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+} catch (e) { ORDERS_DB = []; }
 
-let SERVER_COOLDOWN = { zefame: 0, tikfames: 0, tikfollowers: 0 };
-function updateCooldown(server, seconds) {
-    SERVER_COOLDOWN[server] = seconds;
-    console.log(`⏳ Server ${server} cooldown: ${seconds}s`);
+// Hàm lưu đơn mới
+function createOrderInDb(serviceId, link) {
+    const orderId = Math.floor(Date.now() + Math.random() * 1000); // Unique ID
+    const newOrder = {
+        order: orderId,
+        service: serviceId,
+        link: link,
+        status: 'Pending', // Trạng thái ban đầu
+        start_count: 0,
+        remains: 0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        msg: 'Waiting for process'
+    };
+    ORDERS_DB.unshift(newOrder);
+    // Giữ lại 1000 đơn gần nhất
+    if (ORDERS_DB.length > 1000) ORDERS_DB.pop();
+    saveDb();
+    return orderId;
 }
-setInterval(() => {
-    Object.keys(SERVER_COOLDOWN).forEach(s => { if (SERVER_COOLDOWN[s] > 0) SERVER_COOLDOWN[s] -= 1; });
-}, 1000);
-function isServerReady(server) { return SERVER_COOLDOWN[server] <= 0; }
+
+// Hàm cập nhật trạng thái đơn
+function updateOrderStatus(orderId, status, msg = '') {
+    const index = ORDERS_DB.findIndex(o => o.order == orderId);
+    if (index !== -1) {
+        ORDERS_DB[index].status = status; // Pending, Processing, Completed, Canceled
+        ORDERS_DB[index].msg = msg;
+        ORDERS_DB[index].updated_at = new Date().toISOString();
+        saveDb();
+        console.log(`📝 [ORDER ${orderId}] Update -> ${status} (${msg})`);
+    }
+}
+
+function saveDb() {
+    try { fs.writeFileSync(DB_FILE, JSON.stringify(ORDERS_DB, null, 2)); } catch (e) {}
+}
 
 // ==================================================================
-// II. PROXY MANAGER (Smart Logic)
+// 3. CORE & PROXY
 // ==================================================================
-let PROXY_STATE = { ip: null, lastUpdate: 0, isUsed: false };
+app.use(cors());
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true })); // Chuẩn cho PHP
 
-async function fetchProxyFromAPI() {
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+let PROXY_CACHE = { ip: null, lastUpdate: 0 };
+
+async function getNewProxy(forceNew = false) {
     try {
-        if (!GLOBAL_CONFIG.proxyKey) return { success: false, msg: 'Chưa Config Proxy Key' };
-        const response = await axios.get(`https://proxyxoay.shop/api/get.php?key=${GLOBAL_CONFIG.proxyKey}`, { timeout: 30000 });
-        const data = response.data;
-        if (data.status === 100 && data.proxyhttp) {
-             return { success: true, proxy: data.proxyhttp.replace(/http:\/\/|https:\/\/|::/g, '') };
+        if (!GLOBAL_CONFIG.proxyKey) return { success: false, msg: 'No Proxy Key' };
+        const now = Date.now();
+        if (!forceNew && PROXY_CACHE.ip && (now - PROXY_CACHE.lastUpdate < 60000)) {
+            return { success: true, proxy: PROXY_CACHE.ip };
         }
-        if (data.status === 101) {
-            const match = data.message.match(/Con (\d+)s/);
-            return { success: false, wait: match ? parseInt(match[1]) : 60, msg: data.message };
+        
+        const res = await axios.get(`https://proxyxoay.shop/api/get.php?key=${GLOBAL_CONFIG.proxyKey}`, { timeout: 10000 });
+        if (res.data.status === 100 && res.data.proxyhttp) {
+             let proxy = res.data.proxyhttp.replace(/http:\/\/|https:\/\/|::/g, '');
+             PROXY_CACHE.ip = proxy; PROXY_CACHE.lastUpdate = Date.now();
+             return { success: true, proxy: proxy };
         }
-        return { success: false, wait: 0, msg: data.message || 'Lỗi Proxy API', raw: data };
-    } catch (e) { return { success: false, msg: 'Lỗi Net Proxy: ' + e.message }; }
+        if (res.data.status === 101) {
+            const match = res.data.message.match(/(\d+)s/);
+            return { success: false, wait: match ? parseInt(match[1]) : 10, msg: res.data.message };
+        }
+        return { success: false, wait: 5, msg: 'Proxy Error' };
+    } catch (e) { return { success: false, wait: 5, msg: e.message }; }
 }
 
-async function getZefameProxy(forceNew = false) {
-    const now = Date.now();
-    const timeDiff = (now - PROXY_STATE.lastUpdate) / 1000;
-    const waitTime = 60; 
-
-    if (forceNew || PROXY_STATE.isUsed) {
-        if (!forceNew && timeDiff < waitTime) { 
-            const remaining = Math.ceil(waitTime - timeDiff);
-            return { success: false, code: 'PROXY_COOLDOWN', msg: `Chờ đổi IP (${remaining}s)...`, wait: remaining };
-        }
-        console.log('🔄 Đang lấy Proxy mới...');
-        const result = await fetchProxyFromAPI();
-        if (result.success) {
-            PROXY_STATE.ip = result.proxy;
-            PROXY_STATE.lastUpdate = Date.now();
-            PROXY_STATE.isUsed = false;
-            return { success: true, proxy: result.proxy };
-        }
-        return result;
-    }
-    if (!PROXY_STATE.ip) {
-        const result = await fetchProxyFromAPI();
-        if (result.success) {
-            PROXY_STATE.ip = result.proxy;
-            PROXY_STATE.lastUpdate = Date.now();
-            return { success: true, proxy: result.proxy };
-        }
-        return result;
-    }
-    return { success: true, proxy: PROXY_STATE.ip };
-}
-
-function markProxyAsUsed() { PROXY_STATE.isUsed = true; }
-
 // ==================================================================
-// III. ZEFAME (FULL DATA + RETRY + 180S)
+// 4. BUFF FUNCTIONS (TRẢ VỀ KẾT QUẢ ĐỂ UPDATE DB)
 // ==================================================================
-const ZEFAME_HEADERS = {
-    'authority': 'zefame-free.com',
-    'accept': 'application/json, text/javascript, */*; q=0.01',
-    'origin': 'https://zefame-free.com',
-    'referer': 'https://zefame-free.com/',
-    'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-    'x-requested-with': 'XMLHttpRequest',
-    'content-type': 'application/x-www-form-urlencoded; charset=UTF-8'
-};
 
-async function runZefameRequest(link, proxy, isRetry = false) {
-    const httpsAgent = new HttpsProxyAgent(`http://${proxy}`);
+// ZEFAME FOLLOW (Có Proxy + Retry)
+async function processZefameFollow(link) {
+    let proxyData = null, attempt = 1;
+    while (attempt <= 5) { // Thử tối đa 5 lần lấy proxy
+        const res = await getNewProxy(true);
+        if (res.success) { proxyData = res; break; }
+        if (res.wait) await sleep((res.wait + 1) * 1000);
+        else return { success: false, msg: res.msg };
+        attempt++;
+    }
+    if (!proxyData) return { success: false, msg: 'Proxy Timeout' };
+
+    const agent = new HttpsProxyAgent(`http://${proxyData.proxy}`);
+    const deviceId = uuidv4();
+    const fakeUser = "user_" + Math.random().toString(36).substring(7);
+
     try {
-        const params = new URLSearchParams();
-        params.append('service', '228'); 
-        params.append('link', link);
-        params.append('uuid', uuidv4());
-        params.append('username', "user_" + Math.random().toString(36).substring(7));
+        await axios.get('https://free.zefame.com/api_free.php', {
+            params: { action: 'check', device: deviceId, service: '228', username: fakeUser },
+            headers: { 'authority': 'free.zefame.com', 'user-agent': 'Mozilla/5.0' },
+            httpsAgent: agent, timeout: 10000
+        }).catch(()=>{});
 
-        const response = await axios.post('https://zefame-free.com/api_free.php?action=order', params, {
-            headers: ZEFAME_HEADERS, httpsAgent, timeout: TIMEOUT_MS // 🔥 180s
-        });
-        return { success: true, data: response.data };
-    } catch (e) {
-        if (!isRetry && (e.message.includes('socket') || e.message.includes('ECONNRESET'))) {
-            return { success: false, needRetry: true, msg: e.message };
-        }
-        // Trả về FULL response data nếu có
-        const errorData = e.response ? e.response.data : null;
-        return { 
-            success: false, 
-            data: errorData, 
-            msg: errorData ? JSON.stringify(errorData) : e.message 
-        };
-    }
+        const res = await axios.post('https://free.zefame.com/api_free.php?action=order', 
+            new URLSearchParams({ service: '228', link: link, uuid: deviceId, username: fakeUser }), 
+            { headers: { 'authority': 'free.zefame.com', 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' }, httpsAgent: agent, timeout: 20000 }
+        );
+
+        const text = JSON.stringify(res.data).toLowerCase();
+        if (text.includes('success') && text.includes('true')) return { success: true, msg: 'Success' };
+        if (text.includes('wait') || text.includes('limit')) return { success: false, msg: 'Rate Limit (Web tự xử lý)' }; // Fail để Web biết mà hoàn tiền hoặc chờ
+        return { success: false, msg: 'API Error' };
+    } catch (e) { return { success: false, msg: e.message }; }
 }
 
-async function buffZefame(link) {
-    if (!isServerReady('zefame')) return { status: false, code: 'COOLDOWN', msg: `Zefame chờ ${SERVER_COOLDOWN.zefame}s`, server: 'zefame' };
+// ZEFAME VIEW/HEART (No Proxy)
+async function processZefameNoProxy(link, type) {
+    const serviceId = type === 'view' ? '229' : '232';
+    try {
+        const resCheck = await axios.post('https://free.zefame.com/api_free.php', new URLSearchParams({ action: 'checkVideoId', link }), { headers: { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' } });
+        let videoId = resCheck.data?.data || resCheck.data?.id || resCheck.data;
+        if (!videoId || typeof videoId === 'object') return { success: false, msg: 'Video ID Not Found' };
 
-    let pData = await getZefameProxy();
-    if (!pData.success) return { status: false, msg: pData.msg, wait_seconds: pData.wait || 10, server: 'zefame', raw: pData.raw };
+        const deviceId = uuidv4();
+        const resOrder = await axios.post('https://free.zefame.com/api_free.php?action=order', 
+            new URLSearchParams({ service: serviceId, link, uuid: deviceId, videoId }), 
+            { headers: { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' } }
+        );
+        
+        const text = JSON.stringify(resOrder.data).toLowerCase();
+        if (text.includes('success') && text.includes('true')) return { success: true, msg: 'Success' };
+        if (text.includes('wait')) return { success: false, msg: 'Rate Limit' };
+        return { success: false, msg: 'API Fail' };
+    } catch (e) { return { success: false, msg: e.message }; }
+}
+
+// VIP SITES
+async function processVip(siteKey, username) {
+    const cfg = siteKey === 'tikfames' 
+        ? { url: "https://tikfames.com", name: 'tikfames' } 
+        : { url: "https://tikfollowers.com", name: 'tikfollowers' };
     
-    let result = await runZefameRequest(link, pData.proxy);
+    const cookie = GLOBAL_CONFIG.cookies[siteKey];
+    if (!cookie) return { success: false, msg: 'No Cookie' };
 
-    // Retry logic
-    if (!result.success && result.needRetry) {
-        console.log('⚠️ Proxy lỗi, đang thử lại...');
-        pData = await getZefameProxy(true);
-        if (pData.success) {
-            result = await runZefameRequest(link, pData.proxy, true);
-        } else {
-            return { status: false, msg: 'Lỗi lấy Proxy Retry', server: 'zefame' };
-        }
-    }
+    try {
+        const headers = { 'Content-Type': 'application/json', 'Cookie': cookie, 'Origin': cfg.url };
+        const sRes = await axios.post(`${cfg.url}/api/search`, { 
+            input: username, type: "getUserDetails", recaptchaToken: siteKey === 'tikfames' ? "fake_"+Date.now() : undefined 
+        }, { headers, timeout: 10000 });
 
-    // --- RETURN FULL DATA ---
-    const textRes = result.data ? JSON.stringify(result.data).toLowerCase() : "";
+        if (!sRes.data.success) return { success: false, msg: 'User/Cookie Error' };
+        await sleep(1000);
+
+        const pPayload = { ...sRes.data, type: siteKey === 'tikfollowers' ? "followers" : "follow" };
+        const pRes = await axios.post(`${cfg.url}/api/process`, pPayload, { headers, timeout: 15000 });
+
+        if (pRes.data.success) return { success: true, msg: 'Success' };
+        if ((pRes.data.message||"").includes('wait')) return { success: false, msg: 'Rate Limit' };
+        return { success: false, msg: 'Process Fail' };
+    } catch (e) { return { success: false, msg: e.message }; }
+}
+
+// ==================================================================
+// 5. TRÌNH XỬ LÝ HÀNG ĐỢI (WORKER)
+// Hàm này chạy ngầm sau khi trả kết quả cho Web
+// ==================================================================
+async function runWorker(orderId, serviceType, link, username) {
+    updateOrderStatus(orderId, 'Processing', 'Đang xử lý...');
     
-    if (result.success && textRes.includes('success') && textRes.includes('true')) {
-        markProxyAsUsed(); 
-        return { status: true, msg: 'Zefame thành công!', server: 'zefame', raw: result.data };
+    let result = { success: false, msg: 'Unknown Error' };
+
+    // Điều hướng logic
+    if (serviceType === 'follow') {
+        result = await processZefameFollow(link);
     } 
-    
-    if (textRes.includes('wait') || textRes.includes('indisponible')) {
-        updateCooldown('zefame', 600); markProxyAsUsed();
-        return { status: false, code: 'RATE_LIMIT', msg: `Zefame Limit: ${JSON.stringify(result.data)}`, server: 'zefame', raw: result.data };
+    else if (serviceType === 'view') {
+        result = await processZefameNoProxy(link, 'view');
     }
-    
-    if (textRes.includes('profil')) {
-         return { status: false, msg: `Lỗi Link: Phải dùng Link Profile!`, server: 'zefame', raw: result.data };
+    else if (serviceType === 'heart') {
+        result = await processZefameNoProxy(link, 'heart');
+    }
+    else if (serviceType === 'vip') {
+        // VIP chạy cả 2 server, 1 cái ăn là tính Success
+        const r1 = await processVip('tikfames', username);
+        const r2 = await processVip('tikfollowers', username);
+        if (r1.success || r2.success) {
+            result = { success: true, msg: `Done (Fames:${r1.success}|Followers:${r2.success})` };
+        } else {
+            result = { success: false, msg: `All Fail: ${r1.msg} | ${r2.msg}` };
+        }
     }
 
-    return { 
-        status: false, 
-        msg: `Zefame Fail: ${JSON.stringify(result.data || result.msg)}`, 
-        server: 'zefame', 
-        raw: result.data // Trả về gốc
-    };
+    // Update DB cuối cùng
+    if (result.success) {
+        updateOrderStatus(orderId, 'Completed', result.msg);
+    } else {
+        // Web thường coi "Canceled" là lỗi để hoàn tiền
+        updateOrderStatus(orderId, 'Canceled', result.msg); 
+    }
 }
 
 // ==================================================================
-// IV. VIP SITES (FULL RAW DATA + 180S)
+// 6. API ENDPOINTS (PANEL STANDARD)
 // ==================================================================
-const VIP_SITES = {
-    tikfames: { search: "https://tikfames.com/api/search", process: "https://tikfames.com/api/process", origin: "https://tikfames.com", serverName: 'tikfames' },
-    tikfollowers: { search: "https://tikfollowers.com/api/search", process: "https://tikfollowers.com/api/process", origin: "https://tikfollowers.com", serverName: 'tikfollowers' }
-};
 
-function handleVipResponse(data, serverName) {
-    const msgStr = JSON.stringify(data).toLowerCase();
-    if (msgStr.includes('wait') || msgStr.includes('minute') || msgStr.includes('second')) {
-        let waitSeconds = 1800;
-        const minMatch = msgStr.match(/(\d+)\s*minute/);
-        const secMatch = msgStr.match(/(\d+)\s*second/);
-        if (minMatch) waitSeconds = parseInt(minMatch[1]) * 60;
-        if (secMatch) waitSeconds += parseInt(secMatch[1]);
-        
-        updateCooldown(serverName, waitSeconds);
-        return { isCooldown: true, msg: `Đang chờ: ${minMatch ? minMatch[1] : 0}p ${secMatch ? secMatch[1] : 0}s` };
-    }
-    return { isCooldown: false };
-}
-
-async function buffVipSite(site, username) {
-    if (!VIP_SITES[site]) return { status: false, msg: 'Site invalid', server: site };
-    const cfg = VIP_SITES[site];
-    const serverName = cfg.serverName;
-
-    if (!isServerReady(serverName)) return { status: false, code: 'COOLDOWN', msg: `${serverName} chờ ${SERVER_COOLDOWN[serverName]}s`, server: serverName };
-
-    const cookie = GLOBAL_CONFIG.cookies[site];
-    if (!cookie) return { status: false, msg: `Thiếu cookie ${site}`, server: serverName };
-
-    const headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Content-Type': 'application/json',
-        'Origin': cfg.origin,
-        'Cookie': cookie,
-        'Referer': cfg.origin + '/'
-    };
-
+// Helper lấy info
+function getInfo(raw) {
+    if (!raw) return null;
     try {
-        const cleanUser = username.replace('@', '');
-        const searchPayload = { input: cleanUser, type: "getUserDetails" };
-        if (site === 'tikfames') searchPayload.recaptchaToken = "fake_" + Math.random().toString(36); 
-
-        // SEARCH REQUEST
-        const res1 = await axios.post(cfg.search, searchPayload, { headers, timeout: TIMEOUT_MS }); // 🔥 180s
-        
-        if (!res1.data.success) {
-            if (JSON.stringify(res1.data).includes('login')) return { status: false, code: 'COOKIE_DIE', msg: 'Cookie Die', server: serverName, raw: res1.data };
-            return { status: false, msg: `Search Error: ${JSON.stringify(res1.data)}`, server: serverName, raw: res1.data };
+        if (raw.includes("tiktok.com")) {
+            const urlObj = new URL(raw);
+            const user = urlObj.pathname.split('/').find(p => p.startsWith('@'))?.replace('@','');
+            if (user) return { username: user, link: `https://www.tiktok.com/@${user}`, raw: raw };
+        } else {
+            const u = raw.replace('@','').trim();
+            return { username: u, link: `https://www.tiktok.com/@${u}`, raw: raw };
         }
-        
-        await new Promise(r => setTimeout(r, 1000)); 
+    } catch (e) { return null; }
+    return null;
+}
 
-        const processPayload = { ...res1.data }; 
-        processPayload.type = (site === 'tikfollowers') ? "followers" : "follow";
-        if (site === 'tikfames') processPayload.recaptchaToken = searchPayload.recaptchaToken;
-
-        // PROCESS REQUEST
-        const res2 = await axios.post(cfg.process, processPayload, { headers, timeout: TIMEOUT_MS }); // 🔥 180s
-
-        if (res2.data.success) return { status: true, msg: `${serverName} thành công!`, server: serverName, raw: res2.data };
-        
-        const check = handleVipResponse(res2.data, serverName);
-        if (check.isCooldown) return { status: false, code: 'RATE_LIMIT', msg: check.msg, server: serverName, raw: res2.data };
-
-        return { status: false, msg: `Process Fail: ${JSON.stringify(res2.data)}`, server: serverName, raw: res2.data };
-
-    } catch (e) {
-        // --- QUAN TRỌNG: LẤY FULL DATA LỖI ---
-        const errorData = e.response ? e.response.data : null;
-        
-        if (errorData) {
-            // Check coi có phải cooldown ẩn trong lỗi 400/500 không
-            const check = handleVipResponse(errorData, serverName);
-            if (check.isCooldown) {
-                return { status: false, code: 'RATE_LIMIT', msg: check.msg, server: serverName, raw: errorData };
-            }
-            return { status: false, msg: `Lỗi API (${e.response.status}): ${JSON.stringify(errorData)}`, server: serverName, raw: errorData };
-        }
-        
-        if (e.code === 'ECONNABORTED') return { status: false, msg: `Timeout > 180s`, server: serverName };
-        return { status: false, msg: `Lỗi Kết Nối: ${e.message}`, server: serverName };
+/**
+ * API TẠO ĐƠN (Standard SMM v2)
+ * Input: service (ID), link
+ * Output: order (ID)
+ */
+app.post('/api/order', (req, res) => {
+    // 1. Lấy input
+    const serviceId = String(req.body.service || req.body.type); // Ép về string '1', '2'...
+    const rawLink = req.body.link || req.body.url;
+    
+    // 2. Validate Service
+    const serviceConfig = SERVICE_MAP[serviceId];
+    if (!serviceConfig) {
+        return res.json({ error: 'Sai ID dịch vụ (Dùng 1,2,3,4)' });
     }
-}
 
-// ==================================================================
-// V. ENDPOINTS
-// ==================================================================
-function generateProfileLink(inputUser) {
-    const cleanUser = inputUser.toString().trim().replace(/^@/, '');
-    return `https://www.tiktok.com/@${cleanUser}`;
-}
+    // 3. Validate Link
+    const info = getInfo(rawLink);
+    if (!info) {
+        return res.json({ error: 'Link TikTok không hợp lệ' });
+    }
 
-async function buffAllServers(username, link = null, isVip = false) {
-    const jobs = [buffVipSite('tikfames', username), buffVipSite('tikfollowers', username)];
-    if (isVip && link) jobs.push(buffZefame(link));
+    // 4. Tạo đơn trong DB (Pending)
+    const orderId = createOrderInDb(serviceId, info.link);
 
-    const results = await Promise.all(jobs);
-    const successCount = results.filter(r => r.status).length;
-    return { status: successCount > 0, msg: `Hoàn thành: ${successCount}/${results.length} thành công`, details: results };
-}
+    // 5. Trả về ngay lập tức cho Web (Non-blocking)
+    res.json({
+        status: 'success', // Có thể dùng 'pending' tùy code web
+        order: orderId
+    });
 
-app.post('/api/free/buff', async (req, res) => {
-    const { username } = req.body;
-    if (!username) return res.json({ status: false, msg: 'Thiếu username' });
-    const result = await buffAllServers(username, null, false);
-    addLog('free', { username, status: result.status, message: result.msg, details: result.details });
-    res.json(result);
+    // 6. Chạy Worker ngầm (Fire and Forget)
+    // Server Node tự chạy cái này, Web PHP không cần chờ
+    runWorker(orderId, serviceConfig.type, info.link, info.username);
 });
 
-app.post('/api/vip/buff', async (req, res) => {
-    const { username } = req.body;
-    if (!username) return res.json({ status: false, msg: 'Thiếu username' });
-    const autoLink = generateProfileLink(username);
-    const result = await buffAllServers(username, autoLink, true);
-    addLog('vip', { username, link: autoLink, status: result.status, message: result.msg, details: result.details });
-    res.json(result);
+/**
+ * API CHECK STATUS (Standard SMM v2)
+ * Input: order (ID)
+ * Output: status, start_count, remains
+ */
+app.post('/api/status', (req, res) => {
+    const orderId = req.body.order || req.body.id;
+    const order = ORDERS_DB.find(o => o.order == orderId);
+
+    if (!order) {
+        return res.json({ error: 'Incorrect order ID' });
+    }
+
+    res.json({
+        status: order.status, // Pending, Processing, Completed, Canceled
+        charge: "0",
+        start_count: "0",
+        remains: "0",
+        currency: "VND",
+        msg: order.msg // Thêm tin nhắn lỗi/thành công để debug
+    });
 });
 
-app.post('/api/admin/update', (req, res) => {
+/**
+ * API SERVICES (Để Web lấy danh sách dịch vụ nếu cần)
+ */
+app.get('/api/services', (req, res) => {
+    const list = Object.keys(SERVICE_MAP).map(k => ({
+        service: k,
+        name: SERVICE_MAP[k].name,
+        type: 'Default',
+        category: 'TikTok Free',
+        rate: 0,
+        min: 1,
+        max: 1000
+    }));
+    res.json(list);
+});
+
+// Admin Routes
+const checkAdmin = (req, res, next) => {
+    if ((req.headers['x-admin-pass'] || req.query.pass) === ADMIN_PASS) next();
+    else res.status(403).json({ success: false });
+};
+app.get('/api/admin/config', checkAdmin, (req, res) => res.json({ config: GLOBAL_CONFIG }));
+app.post('/api/admin/update', checkAdmin, (req, res) => {
     const { type, value, site } = req.body;
-    if (type === 'proxy') GLOBAL_CONFIG.proxyKey = value.trim();
-    if (type === 'cookie') GLOBAL_CONFIG.cookies[site] = value.trim();
-    if (type === 'reset_cooldown') SERVER_COOLDOWN[value] = 0;
-    res.json({ success: true, msg: "Updated!" });
+    if (type === 'proxy') GLOBAL_CONFIG.proxyKey = value;
+    if (type === 'cookie') GLOBAL_CONFIG.cookies[site] = value;
+    res.json({ success: true });
 });
+app.get('/api/logs', checkAdmin, (req, res) => res.json(ORDERS_DB.slice(0, 100)));
 
-app.get('/api/admin/config', (req, res) => res.json({ proxyKey: GLOBAL_CONFIG.proxyKey, cookies: GLOBAL_CONFIG.cookies, cooldowns: SERVER_COOLDOWN, proxyState: PROXY_STATE }));
-app.get('/api/logs', (req, res) => {
-    const { type } = req.query;
-    res.json({ logs: type ? BUFF_LOGS[type] : [...BUFF_LOGS.free, ...BUFF_LOGS.vip] });
-});
-
-app.post('/api/buff/zefame', async (req, res) => {
-    const { username, link } = req.body;
-    let targetLink = link || (username ? generateProfileLink(username) : null);
-    if (!targetLink) return res.json({ status: false, msg: 'Thiếu link/username' });
-    res.json(await buffZefame(targetLink));
-});
-app.post('/api/buff/tikfames', async (req, res) => {
-    if (!req.body.username) return res.json({ status: false });
-    res.json(await buffVipSite('tikfames', req.body.username));
-});
-app.post('/api/buff/tikfollowers', async (req, res) => {
-    if (!req.body.username) return res.json({ status: false });
-    res.json(await buffVipSite('tikfollowers', req.body.username));
-});
-
-app.listen(PORT, () => console.log(`🚀 Server Tiệp Gà Cui running on PORT ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 SMM PROVIDER RUNNING ON PORT ${PORT}`));
